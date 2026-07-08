@@ -23,9 +23,10 @@
           @mouseup.stop.prevent="onMouseUp"
           @mouseenter.stop.prevent="onMouseEnter"
           @mouseleave.stop.prevent="onMouseLeave"
-          @touchmove.stop.prevent="onTouchHandler"
-          @touchstart.stop.prevent="onTouchHandler"
-          @touchend.stop.prevent="onTouchHandler"
+          @touchstart.stop.prevent="onTouchStart"
+          @touchmove.stop.prevent="onTouchMove"
+          @touchend.stop.prevent="onTouchEnd"
+          @touchcancel.stop.prevent="onTouchEnd"
           @compositionstart="onCompositionStartHandler"
           @compositionend="onCompositionEndHandler"
         />
@@ -70,6 +71,33 @@
           @click.stop.prevent="openMobileKeyboard"
         >
           <i class="fas fa-keyboard" />
+        </li>
+      </ul>
+      <ul v-if="hosting && is_touch_device && !fullscreen && !hideControls" class="touch-toolbar">
+        <li @click.stop.prevent="remoteClick(3)" v-tooltip="{ content: 'Right Click', placement: 'right' }">
+          <i class="fas fa-mouse-pointer" />
+        </li>
+        <li
+          @touchstart.stop.prevent="startHold(-1)"
+          @touchend.stop.prevent="stopHold"
+          @touchcancel.stop.prevent="stopHold"
+          v-tooltip="{ content: 'Scroll Up', placement: 'right' }"
+        >
+          <i class="fas fa-chevron-up" />
+        </li>
+        <li
+          @touchstart.stop.prevent="startHold(1)"
+          @touchend.stop.prevent="stopHold"
+          @touchcancel.stop.prevent="stopHold"
+          v-tooltip="{ content: 'Scroll Down', placement: 'right' }"
+        >
+          <i class="fas fa-chevron-down" />
+        </li>
+        <li @click.stop.prevent="sendZoom(1)" v-tooltip="{ content: 'Zoom In', placement: 'right' }">
+          <i class="fas fa-search-plus" />
+        </li>
+        <li @click.stop.prevent="sendZoom(-1)" v-tooltip="{ content: 'Zoom Out', placement: 'right' }">
+          <i class="fas fa-search-minus" />
         </li>
       </ul>
       <neko-resolution ref="resolution" v-if="admin" />
@@ -133,6 +161,44 @@
             &.extra-control {
               display: block;
             }
+          }
+
+          &:last-child {
+            margin: 0;
+          }
+        }
+      }
+
+      .touch-toolbar {
+        position: absolute;
+        left: 12px;
+        top: 50%;
+        transform: translateY(-50%);
+        display: flex;
+        flex-direction: column;
+        z-index: 5;
+
+        li {
+          margin: 0 0 12px 0;
+          list-style: none;
+
+          i {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 42px;
+            height: 42px;
+            background: rgba($color: #000, $alpha: 0.45);
+            border-radius: 50%;
+            font-size: 18px;
+            color: rgba($color: #fff, $alpha: 0.85);
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+          }
+
+          &:active i {
+            background: rgba($color: #000, $alpha: 0.7);
           }
 
           &:last-child {
@@ -730,33 +796,175 @@
       }
     }
 
-    onTouchHandler(e: TouchEvent) {
-      let first = e.changedTouches[0]
-      let type = ''
-      switch (e.type) {
-        case 'touchstart':
-          type = 'mousedown'
-          break
-        case 'touchmove':
-          type = 'mousemove'
-          break
-        case 'touchend':
-          type = 'mouseup'
-          break
-        default:
-          return
+    // === Mobile touchpad controls ===================================
+    // Instead of jumping the remote cursor to wherever you tap (which is
+    // imprecise on a small phone screen), we track a virtual cursor
+    // position and move it *relatively* as you drag your finger, like a
+    // laptop touchpad. Buttons in the .touch-toolbar cover right-click,
+    // scroll and zoom, since those aren't natural touch gestures.
+
+    private touchX = 0
+    private touchY = 0
+    private touchReady = false
+
+    private touchLastX = 0
+    private touchLastY = 0
+    private touchStartTime = 0
+    private touchMoved = false
+    private longPressTimer: number | null = null
+    private holdInterval: number | null = null
+
+    private twoFingerActive = false
+    private lastPinchDist = 0
+    private lastTwoFingerY = 0
+
+    readonly TOUCH_SENSITIVITY = 1.6
+    readonly TAP_MOVE_THRESHOLD = 10
+    readonly LONG_PRESS_MS = 450
+
+    private ensureTouchReady() {
+      if (!this.touchReady) {
+        const { w, h } = this.$accessor.video.resolution
+        this.touchX = w / 2
+        this.touchY = h / 2
+        this.touchReady = true
+      }
+    }
+
+    private moveTouchCursor(dx: number, dy: number) {
+      const { w, h } = this.$accessor.video.resolution
+      this.touchX = Math.min(Math.max(this.touchX + dx * this.TOUCH_SENSITIVITY, 0), w)
+      this.touchY = Math.min(Math.max(this.touchY + dy * this.TOUCH_SENSITIVITY, 0), h)
+      this.$client.sendData('mousemove', { x: Math.round(this.touchX), y: Math.round(this.touchY) })
+    }
+
+    remoteClick(button: number) {
+      if (!this.hosting || this.locked) return
+      this.ensureTouchReady()
+      this.$client.sendData('mousemove', { x: Math.round(this.touchX), y: Math.round(this.touchY) })
+      this.$client.sendData('mousedown', { key: button })
+      window.setTimeout(() => {
+        this.$client.sendData('mouseup', { key: button })
+      }, 60)
+    }
+
+    sendZoom(direction: number) {
+      // direction: 1 = zoom in, -1 = zoom out (simulates holding Ctrl + scroll,
+      // which is the standard browser zoom shortcut)
+      if (!this.hosting || this.locked) return
+      this.$client.sendData('keydown', { key: this.KeyTable.XK_Control_L })
+      this.$client.sendData('wheel', { x: 0, y: direction > 0 ? -100 : 100 })
+      window.setTimeout(() => {
+        this.$client.sendData('keyup', { key: this.KeyTable.XK_Control_L })
+      }, 60)
+    }
+
+    startHold(direction: number) {
+      // direction: -1 = scroll up, 1 = scroll down
+      if (!this.hosting || this.locked) return
+      const fire = () => this.$client.sendData('wheel', { x: 0, y: direction * 90 })
+      fire()
+      this.holdInterval = window.setInterval(fire, 150)
+    }
+
+    stopHold() {
+      if (this.holdInterval) {
+        clearInterval(this.holdInterval)
+        this.holdInterval = null
+      }
+    }
+
+    onTouchStart(e: TouchEvent) {
+      if (!this.hosting || this.locked) {
+        if (!this.controlling) {
+          this.implicitHostingRequest(new MouseEvent('mousedown'))
+        }
+        return
       }
 
-      const simulatedEvent = new MouseEvent(type, {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        screenX: first.screenX,
-        screenY: first.screenY,
-        clientX: first.clientX,
-        clientY: first.clientY,
-      })
-      first.target.dispatchEvent(simulatedEvent)
+      this.ensureTouchReady()
+
+      if (e.touches.length === 1) {
+        const t = e.touches[0]
+        this.touchLastX = t.clientX
+        this.touchLastY = t.clientY
+        this.touchStartTime = Date.now()
+        this.touchMoved = false
+        this.twoFingerActive = false
+
+        this.longPressTimer = window.setTimeout(() => {
+          if (!this.touchMoved) {
+            this.remoteClick(3) // right click
+          }
+          this.longPressTimer = null
+        }, this.LONG_PRESS_MS)
+      } else if (e.touches.length === 2) {
+        if (this.longPressTimer) {
+          clearTimeout(this.longPressTimer)
+          this.longPressTimer = null
+        }
+        this.twoFingerActive = true
+        const [t1, t2] = [e.touches[0], e.touches[1]]
+        this.lastPinchDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY)
+        this.lastTwoFingerY = (t1.clientY + t2.clientY) / 2
+      }
+    }
+
+    onTouchMove(e: TouchEvent) {
+      if (!this.hosting || this.locked) return
+
+      if (e.touches.length === 1 && !this.twoFingerActive) {
+        const t = e.touches[0]
+        const dx = t.clientX - this.touchLastX
+        const dy = t.clientY - this.touchLastY
+
+        if (!this.touchMoved && (Math.abs(dx) > this.TAP_MOVE_THRESHOLD || Math.abs(dy) > this.TAP_MOVE_THRESHOLD)) {
+          this.touchMoved = true
+          if (this.longPressTimer) {
+            clearTimeout(this.longPressTimer)
+            this.longPressTimer = null
+          }
+        }
+
+        if (this.touchMoved) {
+          this.moveTouchCursor(dx, dy)
+          this.touchLastX = t.clientX
+          this.touchLastY = t.clientY
+        }
+      } else if (e.touches.length === 2) {
+        const [t1, t2] = [e.touches[0], e.touches[1]]
+        const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY)
+        const midY = (t1.clientY + t2.clientY) / 2
+
+        const distDelta = dist - this.lastPinchDist
+        const yDelta = midY - this.lastTwoFingerY
+
+        if (Math.abs(distDelta) > 4 && Math.abs(distDelta) > Math.abs(yDelta)) {
+          this.sendZoom(distDelta > 0 ? 1 : -1)
+          this.lastPinchDist = dist
+        } else if (Math.abs(yDelta) > 4) {
+          const y = this.scroll_invert ? -yDelta : yDelta
+          this.$client.sendData('wheel', { x: 0, y: Math.round(y) })
+          this.lastTwoFingerY = midY
+        }
+      }
+    }
+
+    onTouchEnd(e: TouchEvent) {
+      if (!this.hosting || this.locked) return
+
+      if (this.longPressTimer) {
+        clearTimeout(this.longPressTimer)
+        this.longPressTimer = null
+      }
+
+      if (e.touches.length === 0) {
+        if (!this.touchMoved && !this.twoFingerActive) {
+          // short tap with no movement -> left click
+          this.remoteClick(1)
+        }
+        this.twoFingerActive = false
+      }
     }
 
     onCompositionStartHandler() {
